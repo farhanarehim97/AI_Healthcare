@@ -1,0 +1,158 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+import tensorflow as tf
+import os 
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.python.keras.layers import Dense, Flatten
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.optimizers import Adam
+
+from tensorflow.keras.layers import Flatten,Dense,Dropout,BatchNormalization
+from tensorflow.keras.models import Model,Sequential
+
+from tensorflow.keras.layers import Conv2D, MaxPooling2D
+from tensorflow.keras.layers import GlobalAveragePooling2D
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2
+import tensorflow as tf
+import os
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.python.keras.layers import Dense, Flatten
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.optimizers import Adam
+
+from tensorflow.keras.layers import Flatten, Dense, Dropout, BatchNormalization
+from tensorflow.keras.models import Model, Sequential
+
+from tensorflow.keras.layers import Conv2D, MaxPooling2D
+from tensorflow.keras.layers import GlobalAveragePooling2D
+batch_size = 32
+img_height = 224
+img_width = 224
+data_dir='/kaggle/input/ct-kidney-dataset-normal-cyst-tumor-and-stone/CT-KIDNEY-DATASET-Normal-Cyst-Tumor-Stone/CT-KIDNEY-DATASET-Normal-Cyst-Tumor-Stone'
+
+train=tf.keras.utils.image_dataset_from_directory(data_dir,image_size=(img_height,img_width),
+                                                validation_split=0.1,
+                                                subset='training',seed=123)
+val=tf.keras.utils.image_dataset_from_directory(data_dir,image_size=(img_height,img_width),
+                                                validation_split=0.2,
+                                                subset='validation',seed=123)
+label_to_class_name = dict(zip(range(len(train.class_names)), train.class_names))
+label_to_class_name
+for image_batch, labels_batch in train:
+  print(image_batch.shape)
+  print(labels_batch.shape)
+  break
+data_iterator = train.as_numpy_iterator()
+batch = data_iterator.next()
+fig, ax = plt.subplots(nrows=4, ncols=4, figsize=(10, 10))
+for i in range(4):  
+    for j in range(4):  
+        index = i * 4 + j  
+        ax[i, j].imshow(batch[0][index].astype(int))
+        ax[i, j].set_title(label_to_class_name[batch[1][index]])
+plt.subplots_adjust(wspace=0.4, hspace=0.4)
+plt.show()
+train=train.map(lambda x,y:(x/255,y))
+val=val.map(lambda x,y:(x/255,y))
+AUTOTUNE = tf.data.AUTOTUNE
+
+train = train.cache().prefetch(buffer_size=AUTOTUNE)
+val = val.cache().prefetch(buffer_size=AUTOTUNE)
+
+import tensorflow as tf
+from tensorflow.keras.layers import Dense, Flatten, BatchNormalization, Dropout
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.models import Sequential
+
+
+resnet_model = ResNet50(input_shape=input_shape, weights=weights, include_top=False)
+        
+for layer in resnet_model.layers:
+    layer.trainable = True
+
+x = GlobalAveragePooling2D()(resnet_model.output)
+x = Dense(512, activation='relu', kernel_regularizer=l2(1e-4))(x)
+x = Dropout(0.5)(x)
+output = Dense(num_classes, activation='softmax')(x)
+
+resnet_net = Model(inputs=resnet_model.input, outputs=output)
+
+resnet_net.compile(optimizer='adam',loss='sparse_categorical_crossentropy',metrics=['accuracy'])
+epochs=10
+history = resnet_net.fit(
+  train,
+  validation_data=val,
+  epochs=epochs
+)
+history_df = pd.DataFrame(history.history)
+history_df.to_csv('ResNet_training.csv', index=False)
+resnet_net.save('ResNet_model.h5')
+import pickle
+from sklearn.metrics import confusion_matrix
+import tensorflow as tf
+
+# Assuming you have a model 'model' and a test dataset 'test_dataset'
+
+# Make predictions using your model
+predictions = resnet_net.predict(val)
+
+# Get the true labels from the test dataset
+true_labels = np.concatenate([y for x, y in val], axis=0)
+
+# Calculate the confusion matrix
+cm = confusion_matrix(true_labels, np.argmax(predictions, axis=1))
+
+# Save the confusion matrix in pkl format
+with open('ResNet_confusion_matrix.pkl', 'wb') as f:
+    pickle.dump(cm, f)
+import pickle
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import ConfusionMatrixDisplay
+
+# Load the saved confusion matrix
+with open('ResNet_confusion_matrix.pkl', 'rb') as f:
+    cm = pickle.load(f)
+
+# Define class names (assuming you have them)
+class_names = ['Cyst', 'Normal', 'Stone', 'Tumor']   # Replace with your actual class names
+
+# Plot the confusion matrix
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_names)
+disp.plot(cmap='viridis', xticks_rotation='vertical', values_format='d')
+
+# Show the confusion matrix plot
+plt.show()
+img = cv2.imread('/kaggle/input/ct-kidney-dataset-normal-cyst-tumor-and-stone/CT-KIDNEY-DATASET-Normal-Cyst-Tumor-Stone/CT-KIDNEY-DATASET-Normal-Cyst-Tumor-Stone/Cyst/Cyst- (1).jpg')
+plt.imshow(img)
+plt.show()
+resize = tf.image.resize(img, (150,150))
+yhat = resnet_net.predict(np.expand_dims(resize/255, 0))
+max_index = np.argmax(yhat)
+label_to_class_name[max_index]
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+epochs = range(1, len(loss)+1)
+plt.plot(epochs, loss, 'b', label='Training loss')
+plt.plot(epochs, val_loss, 'r', label='Validation loss')
+plt.title('Training and Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+plt.show()
+acc = history.history['accuracy']
+val_acc = history.history['val_accuracy']
+plt.plot(epochs, acc, 'b', label='Training acc')
+plt.plot(epochs, val_acc, 'r', label='Validation acc')
+plt.title('Training and Validation Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.show()
