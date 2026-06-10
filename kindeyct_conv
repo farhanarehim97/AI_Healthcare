@@ -1,0 +1,389 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+
+from sklearn.model_selection import train_test_split
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.optimizers import Adam, Adamax
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.layers import Flatten, Dense, Activation, Dropout, BatchNormalization, GlobalAveragePooling2D
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.utils.class_weight import compute_class_weight
+import joblib
+import warnings
+warnings.filterwarnings("ignore")
+
+# For Grad-CAM
+from IPython.display import Image, display
+import shap
+
+print('modules loaded')
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Set data directory
+data_dir = '/content/drive/My Drive/Colab Notebooks/kidneyct'
+filepath = []
+labels = []
+folds = os.listdir(data_dir)
+
+for fold in folds:
+    foldpath = os.path.join(data_dir, fold)
+    filelist = os.listdir(foldpath)
+    for f in filelist:
+        fpath = os.path.join(foldpath, f)
+        filepath.append(fpath)
+        labels.append(fold)
+
+f_series = pd.Series(filepath, name='filepath')
+l_series = pd.Series(labels, name='labels')
+df = pd.concat([f_series, l_series], axis=1)
+
+# Check class distribution
+count = df["labels"].value_counts()
+print("Class distribution:")
+print(count)
+
+plt.figure(figsize=(12, 8))
+sns.barplot(x=count.index, y=count.values, palette='viridis')
+plt.title('The Count of images in each folder')
+plt.xlabel('labels')
+plt.ylabel('count')
+plt.show()
+
+
+# Train-validation-test split
+strat = df['labels']
+train_df, dummy_df = train_test_split(df, test_size=0.3, random_state=42, stratify=strat)
+strate = dummy_df['labels']
+valid_df, test_df = train_test_split(dummy_df, test_size=0.5, random_state=42, stratify=strate)
+
+print(f"Train shape: {train_df.shape}")
+print(f"Validation shape: {valid_df.shape}")
+print(f"Test shape: {test_df.shape}")
+
+batch_size = 32  # Reduced batch size for better generalization
+img_size = (224, 224)
+channels = 3
+img_shape = (img_size[0], img_size[1], channels)
+
+# Enhanced data augmentation to reduce overfitting
+tr_gen = ImageDataGenerator(
+    rotation_range=45,
+    width_shift_range=0.25,
+    height_shift_range=0.25,
+    shear_range=0.2,
+    zoom_range=0.3,
+    horizontal_flip=True,
+    vertical_flip=True,
+    brightness_range=[0.8, 1.2],
+    channel_shift_range=50,
+    fill_mode='reflect',
+    validation_split=0.0
+)
+
+ts_gen = ImageDataGenerator()
+
+
+train_gen = tr_gen.flow_from_dataframe(
+    train_df,
+    x_col='filepath',
+    y_col='labels',
+    target_size=img_size,
+    class_mode='categorical',
+    color_mode='rgb',
+    shuffle=True,
+    batch_size=batch_size
+)
+
+valid_gen = ts_gen.flow_from_dataframe(
+    valid_df,
+    x_col='filepath',
+    y_col='labels',
+    target_size=img_size,
+    class_mode='categorical',
+    color_mode='rgb',
+    shuffle=True,
+    batch_size=batch_size
+)
+
+test_gen = ts_gen.flow_from_dataframe(
+    test_df,
+    x_col='filepath',
+    y_col='labels',
+    target_size=img_size,
+    class_mode='categorical',
+    color_mode='rgb',
+    shuffle=False,
+    batch_size=batch_size
+)
+
+g_dict = train_gen.class_indices
+classes = list(g_dict.keys())
+print("Class indices:", g_dict)
+
+# Visualize sample images with augmentation
+images, labels = next(train_gen)
+plt.figure(figsize=(20, 20))
+for i in range(16):
+    plt.subplot(4, 4, i + 1)
+    image = images[i] / 255
+    plt.imshow(image)
+    index = np.argmax(labels[i])
+    class_name = classes[index]
+    plt.title(class_name, color='black', fontsize=12)
+    plt.axis('off')
+plt.show()
+
+class_weights = compute_class_weight(
+    'balanced',
+    classes=np.unique(train_gen.classes),
+    y=train_gen.classes
+)
+class_weights = dict(enumerate(class_weights))
+print("Class weights:", class_weights)
+
+# Load ConvNeXt Base model
+base_model = keras.applications.ConvNeXtBase(
+    include_top=False,
+    weights='imagenet',
+    input_shape=img_shape,
+    pooling=None
+)
+
+# Freeze initial layers
+base_model.trainable = True
+
+
+fine_tune_at = 100
+
+
+for layer in base_model.layers[:fine_tune_at]:
+    layer.trainable = False
+
+print(f"Number of trainable layers: {sum([layer.trainable for layer in base_model.layers])}")
+
+
+model = Sequential([
+    base_model,
+    GlobalAveragePooling2D(),
+    Dense(512, activation='relu'),
+    Dropout(0.6),  # Increased dropout
+    BatchNormalization(),
+    Dense(256, activation='relu'),
+    Dropout(0.4),
+    BatchNormalization(),
+    Dense(128, activation='relu'),
+    Dropout(0.3),
+    Dense(4, activation='softmax')
+])
+
+
+model.compile(
+    Adamax(learning_rate=0.00005),  # Lower learning rate
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+model.summary()
+
+
+early_stopping = EarlyStopping(
+    monitor='val_loss',
+    patience=10,  # Increased patience
+    restore_best_weights=True,
+    min_delta=0.001
+)
+
+reduce_lr = ReduceLROnPlateau(
+    monitor='val_loss',
+    factor=0.5,  # More aggressive learning rate reduction
+    patience=3,
+    min_lr=1e-7,
+    verbose=1
+)
+
+history = model.fit(
+    train_gen,
+    epochs=50,
+    validation_data=valid_gen,
+    shuffle=False,
+    class_weight=class_weights,
+    callbacks=[early_stopping, reduce_lr]
+)
+
+# Plot training history
+tr_acc = history.history['accuracy']
+tr_loss = history.history['loss']
+val_acc = history.history['val_accuracy']
+val_loss = history.history['val_loss']
+
+index_loss = np.argmin(val_loss)
+val_lowest = val_loss[index_loss]
+index_acc = np.argmax(val_acc)
+acc_highest = val_acc[index_acc]
+
+Epochs = [i+1 for i in range(len(tr_acc))]
+loss_label = f'best epoch= {str(index_loss + 1)}'
+acc_label = f'best epoch= {str(index_acc + 1)}'
+
+plt.figure(figsize=(20, 8))
+plt.style.use('fivethirtyeight')
+
+plt.subplot(1, 2, 1)
+plt.plot(Epochs, tr_loss, 'r', label='Training loss')
+plt.plot(Epochs, val_loss, 'g', label='Validation loss')
+plt.scatter(index_loss + 1, val_lowest, s=150, c='blue', label=loss_label)
+plt.title('Training and Validation Loss')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(Epochs, tr_acc, 'r', label='Training Accuracy')
+plt.plot(Epochs, val_acc, 'g', label='Validation Accuracy')
+plt.scatter(index_acc + 1, acc_highest, s=150, c='blue', label=acc_label)
+plt.title('Training and Validation Accuracy')
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+# Evaluate model
+ts_length = len(test_df)
+test_batch_size = max(sorted([ts_length // n for n in range(1, ts_length + 1) if ts_length % n == 0 and ts_length / n <= 80]))
+test_steps = ts_length // test_batch_size
+
+train_score = model.evaluate(train_gen, steps=test_steps, verbose=1)
+valid_score = model.evaluate(valid_gen, steps=test_steps, verbose=1)
+test_score = model.evaluate(test_gen, steps=test_steps, verbose=1)
+
+print("Train Loss: ", train_score[0])
+print("Train Accuracy: ", train_score[1])
+print('-' * 20)
+print("Valid Loss: ", valid_score[0])
+print("Valid Accuracy: ", valid_score[1])
+print('-' * 20)
+print("Test Loss: ", test_score[0])
+print("Test Accuracy: ", test_score[1])
+
+preds = model.predict(test_gen)
+y_pred = np.argmax(preds, axis=1)
+
+plt.figure(figsize=(10, 5))
+cm = confusion_matrix(test_gen.classes, y_pred)
+labels = list(test_gen.class_indices.keys())
+
+sns.heatmap(cm, annot=True, fmt="d", xticklabels=labels, yticklabels=labels, cmap="Blues", linewidths=.5)
+plt.xlabel('\nPredicted Label', fontsize=13)
+plt.ylabel('Actual Label\n', fontsize=13)
+plt.show()
+
+print(classification_report(test_gen.classes, y_pred, target_names=classes))
+
+# Save model
+model.save('kidney_classification_convnext.h5')
+print("Model saved as kidney_classification_convnext.h5")
+
+# Grad-CAM Implementation
+def get_img_array(img_path, size):
+    img = keras.preprocessing.image.load_img(img_path, target_size=size)
+    array = keras.preprocessing.image.img_to_array(img)
+    array = np.expand_dims(array, axis=0)
+    return array
+
+def make_gradcam_heatmap(img_array, model, last_conv_layer_name, pred_index=None):
+    grad_model = Model(
+        [model.inputs], [model.get_layer(last_conv_layer_name).output, model.output]
+    )
+
+    with tf.GradientTape() as tape:
+        last_conv_layer_output, preds = grad_model(img_array)
+        if pred_index is None:
+            pred_index = tf.argmax(preds[0])
+        class_channel = preds[:, pred_index]
+
+    grads = tape.gradient(class_channel, last_conv_layer_output)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+    last_conv_layer_output = last_conv_layer_output[0]
+    heatmap = last_conv_layer_output @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+    heatmap = tf.maximum(heatmap, 0) / tf.math.reduce_max(heatmap)
+    return heatmap.numpy()
+
+def save_and_display_gradcam(img_path, heatmap, cam_path="cam.jpg", alpha=0.4):
+    img = keras.preprocessing.image.load_img(img_path)
+    img = keras.preprocessing.image.img_to_array(img)
+
+    heatmap = np.uint8(255 * heatmap)
+    jet = plt.colormaps.get_cmap("jet")
+    jet_colors = jet(np.arange(256))[:, :3]
+    jet_heatmap = jet_colors[heatmap]
+
+    jet_heatmap = keras.preprocessing.image.array_to_img(jet_heatmap)
+    jet_heatmap = jet_heatmap.resize((img.shape[1], img.shape[0]))
+    jet_heatmap = keras.preprocessing.image.img_to_array(jet_heatmap)
+
+    superimposed_img = jet_heatmap * alpha + img
+    superimposed_img = keras.preprocessing.image.array_to_img(superimposed_img)
+
+    superimposed_img.save(cam_path)
+    display(Image(cam_path))
+    return superimposed_img
+
+# Select a few sample images for Grad-CAM visualization
+sample_df = test_df.sample(n=5, random_state=42)
+
+# Get the last convolutional layer name
+last_conv_layer_name = None
+for layer in base_model.layers:
+    if isinstance(layer, tf.keras.layers.Conv2D):
+        last_conv_layer_name = layer.name
+        break  # Get the first convolutional layer
+
+if last_conv_layer_name is None:
+    # If no Conv2D layer found, try to find other layer types
+    for layer in base_model.layers:
+        if 'conv' in layer.name:
+            last_conv_layer_name = layer.name
+            break
+
+print("Last conv layer:", last_conv_layer_name)
+
+# Generate Grad-CAM for sample images
+if last_conv_layer_name:
+    plt.figure(figsize=(20, 20))
+    for i, (_, row) in enumerate(sample_df.iterrows()):
+        img_path = row['filepath']
+        true_label = row['labels']
+
+        img_array = get_img_array(img_path, size=img_size)
+        heatmap = make_gradcam_heatmap(img_array, model, last_conv_layer_name)
+
+        plt.subplot(5, 2, 2*i+1)
+        img = plt.imread(img_path)
+        plt.imshow(img)
+        plt.title(f"True: {true_label}")
+        plt.axis('off')
+
+        plt.subplot(5, 2, 2*i+2)
+        superimposed_img = save_and_display_gradcam(img_path, heatmap)
+        plt.imshow(superimposed_img)
+        plt.title("Grad-CAM")
+        plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Could not find convolutional layer for Grad-CAM")
