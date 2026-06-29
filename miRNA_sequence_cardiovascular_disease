@@ -1,0 +1,492 @@
+# ---------------------------
+# 1️⃣ Import libraries
+# ---------------------------
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from xgboost import XGBClassifier
+from sklearn.ensemble import VotingClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, classification_report, roc_auc_score, confusion_matrix
+from sklearn.metrics import roc_curve
+import joblib
+
+# ---------------------------
+# 2️⃣ Load dataset
+# ---------------------------
+df = pd.read_excel("dataset_enhanced_features.xlsx")
+# ---------------------------
+# 3️⃣ Create derived features
+# ---------------------------
+df['MFE_norm'] = df['MFE'] / df['Length']
+df['Stem_Loop_Ratio'] = df['Max_Stem_Length'] / (df['Loop_Count'] + 1)
+df['BasePair_Density'] = df['Base_Pair_Ratio'] * df['Length']
+df['Seed_entropy_norm'] = df['Seed_entropy'] / 3.0
+df['GC_kmer_ratio'] = df['GC_Content'] / (df['G'] + df['C'] + 1e-6)
+
+# Feature interactions
+df['GC_Stem'] = df['GC_Content'] * df['Max_Stem_Length']
+df['U_Loop'] = df['U'] * df['Loop_Count']
+df['BP_MFE'] = df['Base_Pair_Ratio'] * df['MFE_norm']
+
+# ---------------------------
+# 4️⃣ Select features & label
+# ---------------------------
+top_features = [
+    'tri_GAG','di_AA','di_UA','GC_Content','GGGA','GGAC','di_GG','tri_GGA',
+    'tri_CUA','G','tri_UAA','tri_GAC','UACA','tri_AGG','GGAG','tri_AGU','CAGU','Seed_AU'
+]
+derived_features = ['MFE_norm','Stem_Loop_Ratio','BasePair_Density','Seed_entropy_norm','GC_kmer_ratio']
+interaction_features = ['GC_Stem','U_Loop','BP_MFE']
+
+
+# Combine all features
+X = df[top_features + derived_features + interaction_features]
+y = df['Label']
+
+# ---------------------------
+# 5️⃣ Scale features
+# ---------------------------
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+joblib.dump(scaler, "scaler.pkl")
+print("✅ Scaler saved as 'scaler.pkl'")
+
+# ---------------------------
+# 6️⃣ Train-test split
+# ---------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X_scaled, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# ---------------------------
+# 7️⃣ Define individual models
+# ---------------------------
+svm_model = SVC(C=50, gamma=0.01, kernel='sigmoid', probability=True, class_weight='balanced')
+xgb_model = XGBClassifier(eval_metric='logloss', n_estimators=200, max_depth=3)
+rf_model = RandomForestClassifier(n_estimators=300, max_depth=10, max_features='sqrt', min_samples_split=10, random_state=42)
+lr_model = LogisticRegression(max_iter=1000, class_weight='balanced', random_state=42)
+# ---------------------------
+# 📊 Evaluate Individual Models
+# ---------------------------
+
+models = {
+    "SVM": svm_model,
+    "XGBoost": xgb_model,
+    "Random Forest": rf_model,
+    "Logistic Regression": lr_model
+}
+
+for name, model in models.items():
+    print(f"\n🔹 Model: {name}")
+
+    # Train
+    model.fit(X_train, y_train)
+
+    # Predict
+    y_pred_ind = model.predict(X_test)
+
+    # Probabilities (for ROC-AUC)
+    if hasattr(model, "predict_proba"):
+        y_prob_ind = model.predict_proba(X_test)[:,1]
+    else:
+        y_prob_ind = model.decision_function(X_test)
+
+    # Metrics
+    print("Accuracy:", accuracy_score(y_test, y_pred_ind))
+    print("ROC-AUC:", roc_auc_score(y_test, y_prob_ind))
+    print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred_ind))
+
+# ---------------------------
+# 8️⃣ Final Ensemble: Soft Voting
+# ---------------------------
+ensemble = VotingClassifier(
+    estimators=[
+        ('svm', svm_model),
+        ('xgb', xgb_model),
+        ('rf', rf_model),
+        ('lr', lr_model)
+    ],
+    voting='soft',
+    weights=[3,3,2,1]  # SVM and XGBoost have higher weight
+)
+
+# ---------------------------
+# 9️⃣ Train ensemble
+# ---------------------------
+ensemble.fit(X_train, y_train)
+
+# ---------------------------
+# 🔟 Evaluate
+# ---------------------------
+y_pred = ensemble.predict(X_test)
+y_prob = ensemble.predict_proba(X_test)[:,1]
+
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print("\nClassification Report:\n", classification_report(y_test, y_pred))
+print("ROC-AUC:", roc_auc_score(y_test, y_prob))
+print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
+
+import matplotlib.pyplot as plt
+
+# ---------------------------
+# 📊 Store results
+# ---------------------------
+model_names = []
+accuracies = []
+roc_aucs = []
+
+models = {
+    "SVM": svm_model,
+    "XGBoost": xgb_model,
+    "Random Forest": rf_model,
+    "Logistic Regression": lr_model
+}
+
+# ---------------------------
+# 📊 Evaluate individual models
+# ---------------------------
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    y_pred_ind = model.predict(X_test)
+
+    if hasattr(model, "predict_proba"):
+        y_prob_ind = model.predict_proba(X_test)[:,1]
+    else:
+        y_prob_ind = model.decision_function(X_test)
+
+    acc = accuracy_score(y_test, y_pred_ind)
+    roc = roc_auc_score(y_test, y_prob_ind)
+
+    model_names.append(name)
+    accuracies.append(acc)
+    roc_aucs.append(roc)
+
+# ---------------------------
+# 📊 Add ensemble results
+# ---------------------------
+model_names.append("Ensemble")
+accuracies.append(accuracy_score(y_test, y_pred))
+roc_aucs.append(roc_auc_score(y_test, y_prob))
+
+# ---------------------------
+# 📊 Accuracy Bar Graph
+# ---------------------------
+plt.figure()
+plt.bar(model_names, accuracies)
+plt.title("Model Accuracy Comparison")
+plt.xlabel("Models")
+plt.ylabel("Accuracy")
+plt.xticks(rotation=30)
+plt.tight_layout()
+plt.savefig("accuracy_comparison.png")
+plt.show()
+
+# ---------------------------
+# 📊 ROC-AUC Bar Graph
+# ---------------------------
+plt.figure()
+plt.bar(model_names, roc_aucs)
+plt.title("Model ROC-AUC Comparison")
+plt.xlabel("Models")
+plt.ylabel("ROC-AUC Score")
+plt.xticks(rotation=30)
+plt.tight_layout()
+plt.savefig("roc_auc_comparison.png")
+plt.show()
+
+plt.figure()
+
+# Loop through individual models
+for name, model in models.items():
+    model.fit(X_train, y_train)
+
+    if hasattr(model, "predict_proba"):
+        y_prob_ind = model.predict_proba(X_test)[:,1]
+    else:
+        y_prob_ind = model.decision_function(X_test)
+
+    fpr, tpr, _ = roc_curve(y_test, y_prob_ind)
+    plt.plot(fpr, tpr, label=f"{name}")
+
+# Ensemble ROC
+fpr, tpr, _ = roc_curve(y_test, y_prob)
+plt.plot(fpr, tpr, linestyle='--', label="Ensemble")
+
+# Diagonal line (random classifier)
+plt.plot([0,1], [0,1], linestyle=':')
+
+plt.title("ROC Curve Comparison")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.legend()
+plt.tight_layout()
+plt.savefig("roc_curve_all_models.png")
+plt.show()
+# ---------------------------
+# 1️⃣1️⃣ Save model
+# ---------------------------
+joblib.dump(ensemble, "miRNA_Final_Ensemble.pkl")
+print("✅ Final ensemble model saved as 'miRNA_Final_Ensemble.pkl'")
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# ---------------------------
+# 📊 Confusion Matrix Plot
+# ---------------------------
+cm = confusion_matrix(y_test, y_pred)
+
+plt.figure(figsize=(6,5))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+            xticklabels=['Predicted Negative', 'Predicted Positive'],
+            yticklabels=['Actual Negative', 'Actual Positive'])
+
+plt.xlabel('Predicted Label')
+plt.ylabel('True Label')
+plt.title('Confusion Matrix - Final Ensemble Model(miRNA-CVD)')
+
+plt.savefig("confusion_matrix.png")  # Save as image
+plt.show()
+import shap
+import joblib
+import pandas as pd
+shap.initjs()
+
+
+# Load your saved scaler and ensemble model
+scaler = joblib.load("scaler.pkl")
+ensemble = joblib.load("miRNA_Final_Ensemble.pkl")
+
+# Load your dataset for explanation (use your test or full dataset)
+df = pd.read_excel("dataset_enhanced_features.xlsx")
+
+# Apply derived features exactly as during training
+df['MFE_norm'] = df['MFE'] / df['Length']
+df['Stem_Loop_Ratio'] = df['Max_Stem_Length'] / (df['Loop_Count'] + 1)
+df['BasePair_Density'] = df['Base_Pair_Ratio'] * df['Length']
+df['Seed_entropy_norm'] = df['Seed_entropy'] / 3.0
+df['GC_kmer_ratio'] = df['GC_Content'] / (df['G'] + df['C'] + 1e-6)
+df['GC_Stem'] = df['GC_Content'] * df['Max_Stem_Length']
+df['U_Loop'] = df['U'] * df['Loop_Count']
+df['BP_MFE'] = df['Base_Pair_Ratio'] * df['MFE_norm']
+
+# Feature list
+top_features = [
+    'tri_GAG','di_AA','di_UA','GC_Content','GGGA','GGAC','di_GG','tri_GGA',
+    'tri_CUA','G','tri_UAA','tri_GAC','UACA','tri_AGG','GGAG','tri_AGU','CAGU','Seed_AU'
+]
+derived_features = ['MFE_norm','Stem_Loop_Ratio','BasePair_Density','Seed_entropy_norm','GC_kmer_ratio']
+interaction_features = ['GC_Stem','U_Loop','BP_MFE']
+features = top_features + derived_features + interaction_features
+
+X = df[features]
+X_scaled = scaler.transform(X)
+
+# Since VotingClassifier is a meta-estimator, it doesn't support SHAP directly.
+# Pick one of the strong base learners, e.g., XGBoost, for SHAP explanation
+xgb_model = ensemble.named_estimators_['xgb']
+
+# Create SHAP explainer for XGBoost
+explainer = shap.TreeExplainer(xgb_model)
+shap_values = explainer.shap_values(X_scaled)
+
+# Visualize global feature importance
+shap.summary_plot(shap_values, features=X, feature_names=features)
+
+
+# --- Incorporate SHAP Interpretations ---
+
+# Use SHAP insights to:
+# - Identify top predictive features driving model decisions
+# - Guide further feature engineering or model refinement
+# - Support biological validation by prioritizing features with high SHAP importance
+
+import pandas as pd
+import math
+from collections import Counter
+from itertools import product
+
+# === Load Dataset ===
+print("Loading dataset...")
+df = pd.read_excel("demo.xlsx")
+
+# Column names in your file
+mirna_col = "miRNA_NAME"
+seq_col = "Sequences"
+
+# === Helper functions ===
+def nucleotide_composition(seq):
+    counts = Counter(seq)
+    total = len(seq)
+    return {nt: counts.get(nt, 0)/total for nt in "AUGC"}
+
+def dinucleotide_freq(seq):
+    pairs = [seq[i:i+2] for i in range(len(seq)-1)]
+    counts = Counter(pairs)
+    total = len(pairs) if pairs else 1
+    return {"di_"+p: counts.get(p, 0)/total for p in ["".join(x) for x in product("AUGC", repeat=2)]}
+
+def trinucleotide_freq(seq):
+    triplets = [seq[i:i+3] for i in range(len(seq)-2)]
+    counts = Counter(triplets)
+    total = len(triplets) if triplets else 1
+    return {"tri_"+t: counts.get(t, 0)/total for t in ["".join(x) for x in product("AUGC", repeat=3)]}
+
+def tetranucleotide_freq(seq):
+    quads = [seq[i:i+4] for i in range(len(seq)-3)]
+    counts = Counter(quads)
+    total = len(quads) if quads else 1
+    return {q: counts.get(q, 0)/total for q in ["".join(x) for x in product("AUGC", repeat=4)]}
+
+def gc_content(seq):
+    return (seq.count("G") + seq.count("C")) / len(seq) if seq else 0
+def au(seq):
+    return (seq.count("A") + seq.count("U")) / len(seq) if seq else 0
+
+def shannon_entropy(seq):
+    counts = Counter(seq)
+    total = len(seq)
+    entropy = 0
+    for base in counts:
+        p = counts[base]/total
+        entropy -= p * math.log2(p)
+    return entropy
+
+def extract_seed_features(seq):
+    seed = seq[1:7] if len(seq) >= 7 else seq
+    return {
+        "Seed_seq": seed,
+        "Seed_GC": gc_content(seed),
+         "Seed_AU": au(seed),
+        "Seed_entropy": shannon_entropy(seed)
+    }
+
+# === Feature Extraction ===
+features = []
+for _, row in df.iterrows():
+    seq = str(row[seq_col]).upper().replace("T","U")  # normalize to RNA alphabet
+    feats = {
+        "miRNA_NAME": row[mirna_col],
+        "Sequence": seq,
+        "Length": len(seq),
+        "GC_Content": gc_content(seq),
+        "Entropy": shannon_entropy(seq)
+    }
+    feats.update(nucleotide_composition(seq))
+    feats.update(dinucleotide_freq(seq))
+    feats.update(trinucleotide_freq(seq))
+    feats.update(tetranucleotide_freq(seq))
+    feats.update(extract_seed_features(seq))
+    features.append(feats)
+
+features_df = pd.DataFrame(features)
+
+# === Save Outputs====
+features_df.to_excel("sequence_features.xlsx", index=False)
+
+print("✅ Feature extraction complete. Files saved:")
+print(" - sequence_features.xlsx")
+
+!pip install ViennaRNA
+
+import pandas as pd
+
+df = pd.read_excel("sequence_features.xlsx")
+print("Columns:", df.columns)
+print("First 5 rows:\n", df.head())
+import pandas as pd
+import RNA  # from ViennaRNA
+
+# Load dataset
+file_path = "sequence_features.xlsx"
+df = pd.read_excel(file_path)
+
+sequence_column = "Sequence"  # your dataset's sequence column
+
+def analyze_structure(structure):
+    # Count base pairs
+    base_pairs = structure.count('(')
+    length = len(structure)
+    # Calculate base-pair ratio
+    base_pair_ratio = base_pairs / length
+
+    # Calculate stem length (longest continuous run of paired bases)
+    max_stem = max((len(x) for x in ''.join('1' if c in '()' else '0' for c in structure).split('0')), default=0)
+
+    # Count loops: number of unpaired regions ('.')
+    loop_count = structure.count('.')
+
+    return base_pairs, base_pair_ratio, max_stem, loop_count
+
+# Function to get structure & MFE and extra features
+def get_rnafold_features(seq):
+    seq = seq.replace("T", "U")  # RNA uses U instead of T
+    (structure, mfe) = RNA.fold(seq)  # ViennaRNA API
+
+    base_pairs, base_pair_ratio, stem_length, loop_count = analyze_structure(structure)
+
+    return structure, mfe, base_pairs, base_pair_ratio, stem_length, loop_count
+
+# Apply to all sequences
+results = df[sequence_column].apply(get_rnafold_features)
+
+# Unpack results into separate columns
+df["Structure"], df["MFE"], df["Base_Pairs"], df["Base_Pair_Ratio"], df["Max_Stem_Length"], df["Loop_Count"] = zip(*results)
+
+# Save results
+df.to_excel("dataset_with_secondary_features.xlsx", index=False)
+df.to_csv("dataset_with_secondary_features.csv", index=False)
+
+print("✅ Secondary structure features added and saved in dataset_with_secondary_features.*")
+import pandas as pd
+
+df = pd.read_excel("dataset_with_secondary_features.xlsx")
+print("Columns:", df.columns)
+print("First 5 rows:\n", df.head())
+import pandas as pd
+import joblib
+
+# Load scaler and model
+scaler = joblib.load("scaler.pkl")
+ensemble_loaded = joblib.load("miRNA_Final_Ensemble.pkl")
+
+# Load Excel file with multiple rows of new miRNA data
+df = pd.read_excel("dataset_with_secondary_features.xlsx")
+
+# Apply derived features just like in training
+df['MFE_norm'] = df['MFE'] / df['Length']
+df['Stem_Loop_Ratio'] = df['Max_Stem_Length'] / (df['Loop_Count'] + 1)
+df['BasePair_Density'] = df['Base_Pair_Ratio'] * df['Length']
+df['Seed_entropy_norm'] = df['Seed_entropy'] / 3.0
+df['GC_kmer_ratio'] = df['GC_Content'] / (df['G'] + df['C'] + 1e-6)
+
+df['GC_Stem'] = df['GC_Content'] * df['Max_Stem_Length']
+df['U_Loop'] = df['U'] * df['Loop_Count']
+df['BP_MFE'] = df['Base_Pair_Ratio'] * df['MFE_norm']
+
+# Define feature columns in the order used for training
+top_features = [
+    'tri_GAG','di_AA','di_UA','GC_Content','GGGA','GGAC','di_GG','tri_GGA',
+    'tri_CUA','G','tri_UAA','tri_GAC','UACA','tri_AGG','GGAG','tri_AGU','CAGU','Seed_AU'
+]
+derived_features = ['MFE_norm','Stem_Loop_Ratio','BasePair_Density','Seed_entropy_norm','GC_kmer_ratio']
+interaction_features = ['GC_Stem','U_Loop','BP_MFE']
+
+features = top_features + derived_features + interaction_features
+
+# Select feature matrix
+X = df[features]
+
+# Scale features using the loaded scaler
+X_scaled = scaler.transform(X)
+
+# Predict class labels and probabilities for all rows
+pred_labels = ensemble_loaded.predict(X_scaled)
+pred_probs = ensemble_loaded.predict_proba(X_scaled)[:,1]
+
+# Print predictions
+print("Predicted Labels:", pred_labels)
+print("Predicted Probabilities of Positive Class:", pred_probs)
